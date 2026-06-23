@@ -96,8 +96,9 @@ setup_codex() {
 
 # ------------------------------------------------------------------- pi --------
 _pi_dir() {
-  [ -d "$HOME/pi-config/extensions" ] && { echo "$HOME/pi-config/extensions"; return; }
+  [ -d "$HOME/pi-config/extensions" ] && { echo "$HOME/pi-config/extensions"; return 0; }
   [ -d "$HOME/.pi/agent" ] && echo "$HOME/.pi/agent/extensions"
+  return 0
 }
 setup_pi() {
   local dir; dir="$(_pi_dir)"
