@@ -20,6 +20,14 @@ set-hook -g pane-focus-in 'run-shell -b "@SCOUT_BIN@ clear #{pane_id}"'
 set -g window-status-format "#{?#{==:#{@agent_win_alert},waiting},#[fg=#f38ba8]●#[fg=#6c7086] ,#{?#{==:#{@agent_win_alert},done},#[fg=#a6e3a1]●#[fg=#6c7086] ,}} #I:#W "
 set -g window-status-current-format "#{?#{==:#{@agent_win_alert},waiting},#[fg=#f38ba8]●#[fg=#1e1e2e] ,#{?#{==:#{@agent_win_alert},done},#[fg=#a6e3a1]●#[fg=#1e1e2e] ,}} #I:#W "
 
+# Highlight the current window. The formats above dropped tmux's default `#F`
+# marker (which renders `*` next to the active window), so without a style the
+# active window is visually identical to inactive ones. `reverse,bold` swaps
+# fg/bg of whatever your status-style is — theme-neutral, no color hardcoded.
+# Override in your ~/.tmux.conf AFTER `source-file …/tmuxscout.tmux` if you
+# prefer a theme color (e.g. `set -g window-status-current-style 'fg=#1e1e2e,bg=#cba6f7,bold'`).
+set -g window-status-current-style "reverse,bold"
+
 # Default `status-right-length` is 40, which often truncates the badge when the
 # user already has a clock / pane title / battery on the right. Bump it to a
 # value that fits "⏳ NN ✅ NN" plus a typical right-side baseline. Conditional:
