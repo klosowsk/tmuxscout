@@ -43,13 +43,21 @@ setup_tmux() {
   if [ "$1" = print ]; then
     hdr "tmux — add to ~/.tmux.conf:"; say "$line"
     say "(popup opens with: prefix + $TMUXSCOUT_KEY — change via TMUXSCOUT_KEY in your config)"
-    echo; hdr "tmux — add the badge to your status-right:"; say "$BADGE"; return 0
+    echo; hdr "tmux — badge snippet (auto-appended to status-right on source; copy this only if you want to place it yourself):"; say "$BADGE"; return 0
   fi
   hdr "tmux"
+  local badge_line="set -ag status-right \"$BADGE\""
+  local touched=0
   if grep -qF "$line" "$TMUX_CONF" 2>/dev/null; then ok "already sourced from ~/.tmux.conf"
-  else backup "$TMUX_CONF"; printf '\n# tmuxscout\n%s\n' "$line" >> "$TMUX_CONF"; ok "added source line"; fi
-  if tmux show -gv status-right 2>/dev/null | grep -q '@agent_waiting'; then ok "badge present in status-right"
-  else warn "badge missing — add it with: tmuxscout setup tmux --print"; fi
+  else backup "$TMUX_CONF"; printf '\n# tmuxscout\n%s\n' "$line" >> "$TMUX_CONF"; ok "added source line"; touched=1; fi
+  # Append the badge to status-right unless it (or a manual copy of the snippet)
+  # is already in ~/.tmux.conf. `set -ag` preserves any existing right-side content.
+  if grep -qF '@agent_waiting' "$TMUX_CONF" 2>/dev/null; then ok "badge already in ~/.tmux.conf"
+  else
+    [ "$touched" = "1" ] || backup "$TMUX_CONF"
+    printf '%s\n' "$badge_line" >> "$TMUX_CONF"
+    ok "appended badge to status-right (set -ag, preserves existing content)"
+  fi
   [ -n "${TMUX:-}" ] && tmux source-file "$TMUX_CONF" 2>/dev/null && ok "reloaded" || true
 }
 

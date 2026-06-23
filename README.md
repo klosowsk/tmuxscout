@@ -53,7 +53,10 @@ tmuxscout doctor       # what's wired / missing
 tmuxscout uninstall    # reverse everything (keeps your config + repo)
 ```
 
-Add the passive badge to your tmux `status-right` (also shown by `setup tmux --print`):
+The passive badge is appended to your `status-right` automatically (idempotent
+across re-sources, preserves any existing content). If you'd rather place it
+somewhere else, paste this snippet (`tmuxscout setup tmux --print`) into your
+own `status-right` — the auto-append detects it and becomes a no-op:
 
 ```tmux
 #{?@agent_waiting,#[fg=#1e1e2e]#[bg=#f38ba8]#[bold] ⏳ #{@agent_waiting} #[default] ,}#{?@agent_done,#[fg=#1e1e2e]#[bg=#a6e3a1]#[bold] ✅ #{@agent_done} #[default] ,}
