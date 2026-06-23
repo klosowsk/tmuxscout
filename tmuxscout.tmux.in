@@ -1,7 +1,9 @@
 # tmuxscout — tmux integration.
 # This is a TEMPLATE: install.sh substitutes @SCOUT_BIN@ and writes tmuxscout.tmux
 # (a tmux config is not a shell script, so the absolute path is baked in here).
-# Keep it sourced AFTER your own window-status formatting so the markers win.
+# Source order is flexible: the dot is APPENDED to your window-status-format
+# (preserving your theme and the default `#F` marker), and a self-heal check on
+# every source re-appends it if a later theme reload clobbers the format.
 
 # Passive-notification counters (the status-right badge renders these — see README).
 set -g @agent_waiting "0"
@@ -15,18 +17,13 @@ bind @SCOUT_KEY@ display-popup -E -w 80% -h 70% "@SCOUT_BIN@ pick"
 set -g focus-events on
 set-hook -g pane-focus-in 'run-shell -b "@SCOUT_BIN@ clear #{pane_id}"'
 
-# Status-bar alert marker (Catppuccin: waiting=red #f38ba8, done=green #a6e3a1).
-# Prepends a colored dot to windows that have a flagged pane; edit the colors to taste.
-set -g window-status-format "#{?#{==:#{@agent_win_alert},waiting},#[fg=#f38ba8]●#[fg=#6c7086] ,#{?#{==:#{@agent_win_alert},done},#[fg=#a6e3a1]●#[fg=#6c7086] ,}} #I:#W "
-set -g window-status-current-format "#{?#{==:#{@agent_win_alert},waiting},#[fg=#f38ba8]●#[fg=#1e1e2e] ,#{?#{==:#{@agent_win_alert},done},#[fg=#a6e3a1]●#[fg=#1e1e2e] ,}} #I:#W "
-
-# Highlight the current window. The formats above dropped tmux's default `#F`
-# marker (which renders `*` next to the active window), so without a style the
-# active window is visually identical to inactive ones. `reverse,bold` swaps
-# fg/bg of whatever your status-style is — theme-neutral, no color hardcoded.
-# Override in your ~/.tmux.conf AFTER `source-file …/tmuxscout.tmux` if you
-# prefer a theme color (e.g. `set -g window-status-current-style 'fg=#1e1e2e,bg=#cba6f7,bold'`).
-set -g window-status-current-style "reverse,bold"
+# Window-list alert dot (Catppuccin: waiting=red #f38ba8, done=green #a6e3a1).
+# Appended to your existing window-status-format/current-format so your theme
+# and tmux's default `#F` marker (the `*` next to the active window) survive.
+# Self-healing: the dot is detected via @agent_win_alert in the format, so a
+# theme reload that wipes the format gets the dot re-appended on next source.
+if-shell '! tmux show -gv window-status-format         2>/dev/null | grep -q @agent_win_alert' 'set -ag window-status-format         "#{?#{==:#{@agent_win_alert},waiting}, #[fg=#f38ba8]●#[default],#{?#{==:#{@agent_win_alert},done}, #[fg=#a6e3a1]●#[default],}}"'
+if-shell '! tmux show -gv window-status-current-format 2>/dev/null | grep -q @agent_win_alert' 'set -ag window-status-current-format "#{?#{==:#{@agent_win_alert},waiting}, #[fg=#f38ba8]●#[default],#{?#{==:#{@agent_win_alert},done}, #[fg=#a6e3a1]●#[default],}}"'
 
 # Default `status-right-length` is 40, which often truncates the badge when the
 # user already has a clock / pane title / battery on the right. Bump it to a
