@@ -26,7 +26,7 @@ CFG_FILE="${TMUXSCOUT_CONFIG:-$CFG_DIR/config}"
 [ -f "$CFG_FILE" ] && . "$CFG_FILE"
 : "${TMUXSCOUT_KEY:=a}"   # key pressed after the tmux prefix to open the popup
 
-BADGE='#{?@agent_waiting,#[fg=#1e1e2e]#[bg=#f38ba8]#[bold] ⏳ #{@agent_waiting} #[default] ,}#{?@agent_done,#[fg=#1e1e2e]#[bg=#a6e3a1]#[bold] ✅ #{@agent_done} #[default] ,}'
+BADGE='#{?@agent_waiting, #[fg=#1e1e2e]#[bg=#f38ba8]#[bold] ⏳ #{@agent_waiting} #[default],}#{?@agent_done, #[fg=#1e1e2e]#[bg=#a6e3a1]#[bold] ✅ #{@agent_done} #[default],}'
 
 die()  { echo "tmuxscout: $*" >&2; exit 1; }
 hdr()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
@@ -46,17 +46,22 @@ setup_tmux() {
     echo; hdr "tmux — badge snippet (auto-appended to status-right on source; copy this only if you want to place it yourself):"; say "$BADGE"; return 0
   fi
   hdr "tmux"
-  local badge_line="set -ag status-right \"$BADGE\""
-  local touched=0
   if grep -qF "$line" "$TMUX_CONF" 2>/dev/null; then ok "already sourced from ~/.tmux.conf"
-  else backup "$TMUX_CONF"; printf '\n# tmuxscout\n%s\n' "$line" >> "$TMUX_CONF"; ok "added source line"; touched=1; fi
-  # Append the badge to status-right unless it (or a manual copy of the snippet)
-  # is already in ~/.tmux.conf. `set -ag` preserves any existing right-side content.
-  if grep -qF '@agent_waiting' "$TMUX_CONF" 2>/dev/null; then ok "badge already in ~/.tmux.conf"
-  else
-    [ "$touched" = "1" ] || backup "$TMUX_CONF"
-    printf '%s\n' "$badge_line" >> "$TMUX_CONF"
-    ok "appended badge to status-right (set -ag, preserves existing content)"
+  else backup "$TMUX_CONF"; printf '\n# tmuxscout\n%s\n' "$line" >> "$TMUX_CONF"; ok "added source line"; fi
+  # Migrate: earlier versions wrote `set -ag status-right "<badge>"` directly into
+  # ~/.tmux.conf. The badge now lives inside tmuxscout.tmux (guarded by a marker
+  # option, so re-sourcing won't stack copies). Strip the old line(s) if present.
+  if grep -qE '^[[:space:]]*set[[:space:]]+-ag[[:space:]]+status-right[[:space:]]+.*@agent_waiting' "$TMUX_CONF" 2>/dev/null; then
+    backup "$TMUX_CONF"
+    grep -vE '^[[:space:]]*set[[:space:]]+-ag[[:space:]]+status-right[[:space:]]+.*@agent_waiting' "$TMUX_CONF" > "$TMUX_CONF.tmp" && mv "$TMUX_CONF.tmp" "$TMUX_CONF"
+    ok "migrated: removed legacy badge line from ~/.tmux.conf (badge is now self-installing)"
+  fi
+  # If the badge was already stacked into the live status-right (legacy install
+  # + re-sources), strip all our segments and let the next source re-add one.
+  if [ -n "${TMUX:-}" ] && tmux show -gv status-right 2>/dev/null | grep -q '@agent_waiting'; then
+    local clean; clean="$(tmux show -gv status-right 2>/dev/null | sed -E 's/#\{\?@agent_(waiting|done),[^}]*\{@agent_(waiting|done)\}[^}]*\}//g')"
+    tmux set -gu @_tmuxscout_badge_installed 2>/dev/null || true
+    tmux set -g status-right "$clean" 2>/dev/null || true
   fi
   [ -n "${TMUX:-}" ] && tmux source-file "$TMUX_CONF" 2>/dev/null && ok "reloaded" || true
 }

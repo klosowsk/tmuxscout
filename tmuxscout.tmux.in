@@ -19,3 +19,19 @@ set-hook -g pane-focus-in 'run-shell -b "@SCOUT_BIN@ clear #{pane_id}"'
 # Prepends a colored dot to windows that have a flagged pane; edit the colors to taste.
 set -g window-status-format "#{?#{==:#{@agent_win_alert},waiting},#[fg=#f38ba8]●#[fg=#6c7086] ,#{?#{==:#{@agent_win_alert},done},#[fg=#a6e3a1]●#[fg=#6c7086] ,}} #I:#W "
 set -g window-status-current-format "#{?#{==:#{@agent_win_alert},waiting},#[fg=#f38ba8]●#[fg=#1e1e2e] ,#{?#{==:#{@agent_win_alert},done},#[fg=#a6e3a1]●#[fg=#1e1e2e] ,}} #I:#W "
+
+# Default `status-right-length` is 40, which often truncates the badge when the
+# user already has a clock / pane title / battery on the right. Bump it to a
+# value that fits "⏳ NN ✅ NN" plus a typical right-side baseline. Conditional:
+# only raise — never shrink a value the user set higher.
+if-shell '[ "$(tmux show -gv status-right-length 2>/dev/null)" -lt 100 ]' 'set -g status-right-length 100'
+
+# Passive badge: append the counters to status-right exactly once per server.
+# Guarded by a user option so re-sourcing this file (or your ~/.tmux.conf)
+# doesn't stack copies. To customize colors/position, paste the snippet
+# (tmuxscout setup tmux --print) into your own status-right BEFORE sourcing
+# this file — set -ag is skipped if @_tmuxscout_badge_installed is already 1.
+%if "#{!=:#{@_tmuxscout_badge_installed},1}"
+set -ag status-right "#{?@agent_waiting, #[fg=#1e1e2e]#[bg=#f38ba8]#[bold] ⏳ #{@agent_waiting} #[default],}#{?@agent_done, #[fg=#1e1e2e]#[bg=#a6e3a1]#[bold] ✅ #{@agent_done} #[default],}"
+set -g @_tmuxscout_badge_installed 1
+%endif
