@@ -63,21 +63,21 @@ setup_tmux() {
     tmux set -gu @_tmuxscout_badge_installed 2>/dev/null || true
     tmux set -g status-right "$clean" 2>/dev/null || true
   fi
-  # Earlier versions hard-`set -g`'d window-status-format/current-format with a
-  # prefix dot (clobbering the user's theme + dropping tmux's `#F` active-window
-  # marker) and added `window-status-current-style reverse,bold` to compensate.
-  # The dot is now APPENDED via if-shell in tmuxscout.tmux, so reset the live
-  # options here — next source-file re-appends only the dot.
+  # Reset window-status options that carry a stale tmuxscout footprint so the
+  # source-file below replays the user's conf (restoring their custom format)
+  # and our if-shell re-appends the current dot format. Covers two histories:
+  #   - legacy `set -g` clobber (prefix dot + dropped `#F` marker)
+  #   - prior dot append with older spacing
+  # In both cases the live format contains @agent_win_alert; unsetting forces
+  # a clean rebuild. The reverse,bold style was a compensation for the legacy
+  # clobber and is no longer needed — drop it too.
   if [ -n "${TMUX:-}" ]; then
-    if tmux show -gv window-status-format 2>/dev/null | grep -q '@agent_win_alert.*#I:#W '; then
-      tmux set -gu window-status-format 2>/dev/null || true
-    fi
-    if tmux show -gv window-status-current-format 2>/dev/null | grep -q '@agent_win_alert.*#I:#W '; then
-      tmux set -gu window-status-current-format 2>/dev/null || true
-    fi
-    if [ "$(tmux show -gv window-status-current-style 2>/dev/null)" = "reverse,bold" ]; then
-      tmux set -gu window-status-current-style 2>/dev/null || true
-    fi
+    tmux show -gv window-status-format         2>/dev/null | grep -q '@agent_win_alert' \
+      && tmux set -gu window-status-format         2>/dev/null || true
+    tmux show -gv window-status-current-format 2>/dev/null | grep -q '@agent_win_alert' \
+      && tmux set -gu window-status-current-format 2>/dev/null || true
+    [ "$(tmux show -gv window-status-current-style 2>/dev/null)" = "reverse,bold" ] \
+      && tmux set -gu window-status-current-style 2>/dev/null || true
   fi
   [ -n "${TMUX:-}" ] && tmux source-file "$TMUX_CONF" 2>/dev/null && ok "reloaded" || true
 }

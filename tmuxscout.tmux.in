@@ -22,8 +22,8 @@ set-hook -g pane-focus-in 'run-shell -b "@SCOUT_BIN@ clear #{pane_id}"'
 # and tmux's default `#F` marker (the `*` next to the active window) survive.
 # Self-healing: the dot is detected via @agent_win_alert in the format, so a
 # theme reload that wipes the format gets the dot re-appended on next source.
-if-shell '! tmux show -gv window-status-format         2>/dev/null | grep -q @agent_win_alert' 'set -ag window-status-format         "#{?#{==:#{@agent_win_alert},waiting}, #[fg=#f38ba8]●#[default],#{?#{==:#{@agent_win_alert},done}, #[fg=#a6e3a1]●#[default],}}"'
-if-shell '! tmux show -gv window-status-current-format 2>/dev/null | grep -q @agent_win_alert' 'set -ag window-status-current-format "#{?#{==:#{@agent_win_alert},waiting}, #[fg=#f38ba8]●#[default],#{?#{==:#{@agent_win_alert},done}, #[fg=#a6e3a1]●#[default],}}"'
+if-shell '! tmux show -gv window-status-format         2>/dev/null | grep -q @agent_win_alert' 'set -ag window-status-format         "#{?#{==:#{@agent_win_alert},waiting}, #[fg=#f38ba8]●#[default] ,#{?#{==:#{@agent_win_alert},done}, #[fg=#a6e3a1]●#[default] ,}}"'
+if-shell '! tmux show -gv window-status-current-format 2>/dev/null | grep -q @agent_win_alert' 'set -ag window-status-current-format "#{?#{==:#{@agent_win_alert},waiting}, #[fg=#f38ba8]●#[default] ,#{?#{==:#{@agent_win_alert},done}, #[fg=#a6e3a1]●#[default] ,}}"'
 
 # Default `status-right-length` is 40, which often truncates the badge when the
 # user already has a clock / pane title / battery on the right. Bump it to a
