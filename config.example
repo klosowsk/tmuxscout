@@ -1,0 +1,21 @@
+# tmuxscout configuration (plain shell). Copy to:
+#   ${XDG_CONFIG_HOME:-~/.config}/tmuxscout/config
+# Every value can also be set as an environment variable (env wins over this file).
+
+# UI locale: en-US (default) | pt-BR  (matched by prefix, so "pt" also works)
+TMUXSCOUT_LANG="en-US"
+
+# Key that opens the popup, pressed after your tmux prefix (default: prefix + a).
+# After changing it, run:  tmuxscout setup tmux   (regenerates + reloads the binding)
+TMUXSCOUT_KEY="a"
+
+# Log lines shown in the popup preview pane.
+TMUXSCOUT_PREVIEW_LINES="30"
+
+# Troubleshooting: 1 = log every mark decision (marked / skipped + why) to
+# ${XDG_STATE_HOME:-~/.local/state}/tmuxscout/debug.log
+TMUXSCOUT_DEBUG="0"
+
+# Path to the tmuxscout binary used by integrations (Claude/pi/Codex/OpenCode).
+# Defaults to "tmuxscout" resolved from PATH (a symlink is created in ~/.local/bin).
+# TMUXSCOUT_BIN="/opt/tmuxscout/bin/tmuxscout"

@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# tmuxscout setup / doctor / uninstall.
+# Wires the tmux UI and each detected agent. Edits user configs idempotently and
+# WITH BACKUPS (*.bak-<epoch>). Use `--print` to only show what to add (edits
+# nothing) — paste it into your config yourself for the least-invasive path.
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+RADAR_BIN="$ROOT/bin/tmuxscout"
+NOTIFY="$ROOT/integrations/claude-code/claude-notify.sh"
+PI_EXT="$ROOT/integrations/pi/tmuxscout.ts"
+OC_PLUGIN="$ROOT/integrations/opencode/tmuxscout.js"
+CODEX_NOTIFY="$ROOT/integrations/codex/codex-notify.sh"
+TMUX_GEN="$ROOT/tmuxscout.tmux"
+
+TMUX_CONF="$HOME/.tmux.conf"
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+CODEX_CFG="$HOME/.codex/config.toml"
+CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tmuxscout"
+OC_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
+
+# Load config for values setup bakes into the generated tmux file (e.g. the key).
+CFG_FILE="${TMUXSCOUT_CONFIG:-$CFG_DIR/config}"
+# shellcheck disable=SC1090
+[ -f "$CFG_FILE" ] && . "$CFG_FILE"
+: "${TMUXSCOUT_KEY:=a}"   # key pressed after the tmux prefix to open the popup
+
+BADGE='#{?@agent_waiting,#[fg=#1e1e2e]#[bg=#f38ba8]#[bold] ⏳ #{@agent_waiting} #[default] ,}#{?@agent_done,#[fg=#1e1e2e]#[bg=#a6e3a1]#[bold] ✅ #{@agent_done} #[default] ,}'
+
+die()  { echo "tmuxscout: $*" >&2; exit 1; }
+hdr()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
+say()  { printf '  %s\n' "$*"; }
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
+backup() { [ -f "$1" ] && cp "$1" "$1.bak-$(date +%s)" && say "backup: $(basename "$1").bak-*"; }
+
+# ----------------------------------------------------------------- tmux --------
+setup_tmux() {
+  sed -e "s#@SCOUT_BIN@#$RADAR_BIN#g" -e "s#@SCOUT_KEY@#$TMUXSCOUT_KEY#g" \
+    "$ROOT/tmuxscout.tmux.in" > "$TMUX_GEN"
+  local line="source-file $TMUX_GEN"
+  if [ "$1" = print ]; then
+    hdr "tmux — add to ~/.tmux.conf:"; say "$line"
+    say "(popup opens with: prefix + $TMUXSCOUT_KEY — change via TMUXSCOUT_KEY in your config)"
+    echo; hdr "tmux — add the badge to your status-right:"; say "$BADGE"; return 0
+  fi
+  hdr "tmux"
+  if grep -qF "$line" "$TMUX_CONF" 2>/dev/null; then ok "already sourced from ~/.tmux.conf"
+  else backup "$TMUX_CONF"; printf '\n# tmuxscout\n%s\n' "$line" >> "$TMUX_CONF"; ok "added source line"; fi
+  if tmux show -gv status-right 2>/dev/null | grep -q '@agent_waiting'; then ok "badge present in status-right"
+  else warn "badge missing — add it with: tmuxscout setup tmux --print"; fi
+  [ -n "${TMUX:-}" ] && tmux source-file "$TMUX_CONF" 2>/dev/null && ok "reloaded" || true
+}
+
+# --------------------------------------------------------------- claude --------
+setup_claude() {
+  if [ "$1" = print ]; then
+    hdr 'Claude Code — add under "hooks" in ~/.claude/settings.json:'
+    printf '  "Stop": [{ "hooks": [{ "type": "command", "command": "%s done" }]}],\n' "$NOTIFY"
+    printf '  "Notification": [{ "hooks": [{ "type": "command", "command": "%s waiting" }]}]\n' "$NOTIFY"
+    return 0
+  fi
+  hdr "Claude Code"
+  command -v jq >/dev/null 2>&1 || { warn "jq missing — skipped (use --print)"; return 0; }
+  [ -f "$CLAUDE_SETTINGS" ] || { warn "settings.json not found — skipped"; return 0; }
+  backup "$CLAUDE_SETTINGS"
+  local tmp; tmp="$(mktemp)"
+  jq --arg c "$NOTIFY" '
+    .hooks = (.hooks // {})
+    | .hooks.Stop = ([ (.hooks.Stop // [])[] | select((((.hooks[0].command)//"")|test("claude-notify"))|not) ]
+        + [ {"hooks":[{"type":"command","command":($c+" done")}]} ])
+    | .hooks.Notification = ([ (.hooks.Notification // [])[] | select((((.hooks[0].command)//"")|test("claude-notify"))|not) ]
+        + [ {"hooks":[{"type":"command","command":($c+" waiting")}]} ])
+  ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
+  ok "hooks configured (global, no restart)"
+}
+
+# ---------------------------------------------------------------- codex --------
+setup_codex() {
+  local line="notify = [\"$CODEX_NOTIFY\"]"
+  if [ "$1" = print ]; then
+    hdr "Codex — add to the TOP of ~/.codex/config.toml (before any [table] header):"; say "$line"; return 0
+  fi
+  hdr "Codex"
+  command -v codex >/dev/null 2>&1 || { warn "codex not installed — skipped"; return 0; }
+  mkdir -p "$HOME/.codex"
+  if [ -f "$CODEX_CFG" ] && grep -q '^[[:space:]]*notify[[:space:]]*=' "$CODEX_CFG"; then
+    warn "'notify' already set in config.toml — left untouched (see --print)"
+  else
+    backup "$CODEX_CFG"
+    { printf '%s\n' "$line"; [ -f "$CODEX_CFG" ] && cat "$CODEX_CFG"; } > "$CODEX_CFG.tmp" && mv "$CODEX_CFG.tmp" "$CODEX_CFG"
+    ok "notify added (restart codex)"
+  fi
+}
+
+# ------------------------------------------------------------------- pi --------
+_pi_dir() {
+  [ -d "$HOME/pi-config/extensions" ] && { echo "$HOME/pi-config/extensions"; return; }
+  [ -d "$HOME/.pi/agent" ] && echo "$HOME/.pi/agent/extensions"
+}
+setup_pi() {
+  local dir; dir="$(_pi_dir)"
+  if [ "$1" = print ]; then
+    hdr "pi — symlink the extension (auto-discovered at startup):"
+    say "ln -sf $PI_EXT ${dir:-$HOME/.pi/agent/extensions}/tmuxscout.ts"; return 0
+  fi
+  hdr "pi"
+  [ -n "$dir" ] || { warn "pi not detected — skipped"; return 0; }
+  mkdir -p "$dir"; ln -sf "$PI_EXT" "$dir/tmuxscout.ts"; ok "linked into $dir (restart pi)"
+}
+
+# ------------------------------------------------------------- opencode --------
+setup_opencode() {
+  if [ "$1" = print ]; then
+    hdr "OpenCode — symlink the plugin (auto-loaded at startup):"
+    say "ln -sf $OC_PLUGIN $OC_DIR/tmuxscout.js"; return 0
+  fi
+  hdr "OpenCode"
+  command -v opencode >/dev/null 2>&1 || { warn "opencode not installed — skipped"; return 0; }
+  mkdir -p "$OC_DIR"; ln -sf "$OC_PLUGIN" "$OC_DIR/tmuxscout.js"; ok "linked into $OC_DIR (restart opencode)"
+}
+
+cmd_setup() {
+  local target="" mode="edit" a
+  for a in "$@"; do case "$a" in
+    --print) mode="print";; -*) die "unknown flag: $a";; *) [ -z "$target" ] && target="$a";;
+  esac; done
+  case "${target:-all}" in
+    tmux) setup_tmux "$mode";;
+    claude) setup_claude "$mode";;
+    codex) setup_codex "$mode";;
+    pi) setup_pi "$mode";;
+    opencode) setup_opencode "$mode";;
+    all) setup_tmux "$mode"; setup_claude "$mode"; setup_pi "$mode"; setup_opencode "$mode"; setup_codex "$mode";;
+    *) die "usage: tmuxscout setup <tmux|claude|codex|pi|opencode|all> [--print]";;
+  esac
+}
+
+cmd_doctor() {
+  hdr "tmuxscout doctor"
+  command -v tmux >/dev/null 2>&1 && ok "tmux $(tmux -V | awk '{print $2}')" || warn "tmux missing (required)"
+  command -v fzf  >/dev/null 2>&1 && ok "fzf $(fzf --version | awk '{print $1}')" || warn "fzf missing (required for the popup)"
+  command -v jq   >/dev/null 2>&1 && ok "jq (richer summaries)" || warn "jq missing (optional)"
+  grep -qF "source-file $TMUX_GEN" "$TMUX_CONF" 2>/dev/null && ok "tmux integration sourced" || warn "tmux not wired (tmuxscout setup tmux)"
+  tmux show -gv status-right 2>/dev/null | grep -q '@agent_waiting' && ok "status-bar badge" || warn "badge missing (tmuxscout setup tmux --print)"
+  grep -q "claude-notify" "$CLAUDE_SETTINGS" 2>/dev/null && ok "Claude Code hooks" || warn "Claude not wired (tmuxscout setup claude)"
+  grep -q "codex-notify.sh" "$CODEX_CFG" 2>/dev/null && ok "Codex notify" || warn "Codex not wired (tmuxscout setup codex)"
+  { [ -L "$HOME/pi-config/extensions/tmuxscout.ts" ] || [ -L "$HOME/.pi/agent/extensions/tmuxscout.ts" ]; } && ok "pi extension" || warn "pi not wired (tmuxscout setup pi)"
+  [ -L "$OC_DIR/tmuxscout.js" ] && ok "OpenCode plugin" || warn "OpenCode not wired (tmuxscout setup opencode)"
+}
+
+cmd_uninstall() {
+  hdr "tmuxscout uninstall"
+  if [ -f "$TMUX_CONF" ] && grep -qF "source-file $TMUX_GEN" "$TMUX_CONF"; then
+    backup "$TMUX_CONF"
+    grep -v -e "^# tmuxscout$" -e "source-file $TMUX_GEN" "$TMUX_CONF" > "$TMUX_CONF.tmp" && mv "$TMUX_CONF.tmp" "$TMUX_CONF"
+    ok "removed tmux source line (badge in status-right: remove manually)"
+  fi
+  if command -v jq >/dev/null 2>&1 && [ -f "$CLAUDE_SETTINGS" ] && grep -q claude-notify "$CLAUDE_SETTINGS"; then
+    backup "$CLAUDE_SETTINGS"; local tmp; tmp="$(mktemp)"
+    jq '
+      .hooks.Stop = [ (.hooks.Stop // [])[] | select((((.hooks[0].command)//"")|test("claude-notify"))|not) ]
+      | .hooks.Notification = [ (.hooks.Notification // [])[] | select((((.hooks[0].command)//"")|test("claude-notify"))|not) ]
+    ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
+    ok "removed Claude Code hooks"
+  fi
+  if [ -f "$CODEX_CFG" ] && grep -q "codex-notify.sh" "$CODEX_CFG"; then
+    backup "$CODEX_CFG"; grep -v "codex-notify.sh" "$CODEX_CFG" > "$CODEX_CFG.tmp" && mv "$CODEX_CFG.tmp" "$CODEX_CFG"
+    ok "removed Codex notify"
+  fi
+  rm -f "$HOME/pi-config/extensions/tmuxscout.ts" "$HOME/.pi/agent/extensions/tmuxscout.ts" "$OC_DIR/tmuxscout.js" 2>/dev/null || true
+  rm -f "$HOME/.local/bin/tmuxscout" 2>/dev/null || true
+  ok "removed symlinks (extensions + ~/.local/bin/tmuxscout)"
+  say "kept: $CFG_DIR and the repo. Remove them manually if you want."
+}
+
+main() {
+  local sub="${1:-}"; [ $# -gt 0 ] && shift || true
+  case "$sub" in
+    setup)     cmd_setup "$@";;
+    doctor)    cmd_doctor;;
+    uninstall) cmd_uninstall;;
+    *) die "usage: tmuxscout {setup [target] [--print] | doctor | uninstall}";;
+  esac
+}
+main "$@"

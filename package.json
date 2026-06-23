@@ -1,0 +1,36 @@
+{
+  "name": "tmuxscout",
+  "version": "0.1.0",
+  "description": "Event-driven tmux navigator for parallel AI coding agents (Claude Code, pi, OpenCode, Codex)",
+  "bin": {
+    "tmuxscout": "bin/tmuxscout"
+  },
+  "files": [
+    "bin/",
+    "integrations/",
+    "tmuxscout.tmux.in",
+    "config.example",
+    "install.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "echo \"tmuxscout installed. Run 'tmuxscout setup all' to wire tmux + your agents (idempotent, with backups), or 'tmuxscout setup <target> --print' to do it manually.\""
+  },
+  "keywords": [
+    "tmux",
+    "ai",
+    "coding-agent",
+    "claude-code",
+    "codex",
+    "opencode",
+    "cli",
+    "productivity"
+  ],
+  "license": "MIT",
+  "author": "Rodrigo Klosowski",
+  "os": [
+    "linux",
+    "darwin"
+  ]
+}

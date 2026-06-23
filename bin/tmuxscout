@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# tmuxscout — event-driven tmux navigator for parallel AI coding agents.
+#
+# State lives in tmux pane options (no daemon, no polling, self-cleaning):
+#   @agent_status   done|waiting
+#   @agent_done_at  epoch seconds
+#   @agent_label    short label (project / cwd basename)
+#   @agent_summary  one-line summary of what the agent did / needs
+# Window aggregate (for the status bar):
+#   @agent_win_alert  done|waiting  (highest severity among the window's panes)
+# Global counters (rendered by the status-right badge):
+#   @agent_waiting / @agent_done
+#
+# Subcommands: mark | list | pick | preview | clear | refresh
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+
+# --- Config: defaults < config file < environment -----------------------------
+# Config file is plain shell (KEY="value"). Environment variables take precedence.
+: "${TMUXSCOUT_CONFIG:=${XDG_CONFIG_HOME:-$HOME/.config}/tmuxscout/config}"
+__lang_env="${TMUXSCOUT_LANG:-}"
+# shellcheck disable=SC1090
+[ -f "$TMUXSCOUT_CONFIG" ] && . "$TMUXSCOUT_CONFIG"
+[ -n "$__lang_env" ] && TMUXSCOUT_LANG="$__lang_env"
+: "${TMUXSCOUT_LANG:=en-US}"       # ui locale: en-US (default) | pt-BR (matched by prefix)
+: "${TMUXSCOUT_PREVIEW_LINES:=30}" # log lines shown in the popup preview
+: "${TMUXSCOUT_DEBUG:=0}"           # 1 = log mark decisions for troubleshooting
+
+die() { echo "tmuxscout: $*" >&2; exit 1; }
+in_tmux() { [ -n "${TMUX:-}" ]; }
+
+# Troubleshooting log (enable with TMUXSCOUT_DEBUG=1 in the config or env).
+_dbg() {
+  [ "${TMUXSCOUT_DEBUG}" = "1" ] || return 0
+  local f="${XDG_STATE_HOME:-$HOME/.local/state}/tmuxscout/debug.log"
+  mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+  printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" >> "$f" 2>/dev/null || true
+}
+
+# --- i18n: t <key> [printf-arg] -----------------------------------------------
+# Locale is matched by lowercase prefix, so "pt-BR", "pt_BR" and "pt" all work.
+# Add a language by extending the case blocks below.
+t() {
+  local k="$1"
+  case "${TMUXSCOUT_LANG,,}" in
+    pt*)
+      case "$k" in
+        word_waiting) printf 'aguarda' ;;
+        word_done)    printf 'pronto' ;;
+        state_waiting) printf '⏳ aguardando input' ;;
+        state_done)    printf '✅ concluído' ;;
+        lbl_project) printf 'PROJETO' ;;
+        lbl_session) printf 'SESSÃO' ;;
+        lbl_state)   printf 'ESTADO' ;;
+        lbl_summary) printf 'RESUMO' ;;
+        lbl_logs)    printf 'LOGS DO AGENTE' ;;
+        ago)         printf 'há %s' "${2:-}" ;;
+        window)      printf 'window' ;;
+        no_summary)  printf '(sem resumo — agente sem transcript ou ainda sem resposta)' ;;
+        no_pane)     printf '(sem pane)' ;;
+        none_title)  printf 'Nenhum agente sinalizado.' ;;
+        none_hint)   printf 'Aparecem aqui quando terminam (✅) ou pedem input (⏳).' ;;
+        press_key)   printf '— pressione qualquer tecla para fechar —' ;;
+        no_fzf)      printf 'fzf não encontrado — rode o install.sh' ;;
+        prompt)      printf 'agentes ▶ ' ;;
+        *) printf '%s' "$k" ;;
+      esac ;;
+    *)
+      case "$k" in
+        word_waiting) printf 'waiting' ;;
+        word_done)    printf 'ready' ;;
+        state_waiting) printf '⏳ waiting for input' ;;
+        state_done)    printf '✅ done' ;;
+        lbl_project) printf 'PROJECT' ;;
+        lbl_session) printf 'SESSION' ;;
+        lbl_state)   printf 'STATE' ;;
+        lbl_summary) printf 'SUMMARY' ;;
+        lbl_logs)    printf 'AGENT LOGS' ;;
+        ago)         printf '%s ago' "${2:-}" ;;
+        window)      printf 'window' ;;
+        no_summary)  printf '(no summary — agent has no transcript or no reply yet)' ;;
+        no_pane)     printf '(no pane)' ;;
+        none_title)  printf 'No agents flagged.' ;;
+        none_hint)   printf 'They appear here when they finish (✅) or need input (⏳).' ;;
+        press_key)   printf '— press any key to close —' ;;
+        no_fzf)      printf 'fzf not found — run install.sh' ;;
+        prompt)      printf 'agents ▶ ' ;;
+        *) printf '%s' "$k" ;;
+      esac ;;
+  esac
+}
+
+# Recompute a window's aggregate alert from its panes' @agent_status.
+_refresh_window() {
+  local pane="$1" win sev="" st
+  win="$(tmux display-message -p -t "$pane" '#{session_name}:#{window_index}' 2>/dev/null)" || return 0
+  [ -n "$win" ] || return 0
+  while IFS= read -r st; do
+    if [ "$st" = "waiting" ]; then sev="waiting"; break; fi
+    [ "$st" = "done" ] && sev="done"
+  done < <(tmux list-panes -t "$win" -F '#{@agent_status}' 2>/dev/null)
+  if [ -n "$sev" ]; then
+    tmux set -w -t "$win" @agent_win_alert "$sev" 2>/dev/null || true
+  else
+    tmux set -uw -t "$win" @agent_win_alert 2>/dev/null || true
+  fi
+  _refresh_badge
+}
+
+# Recompute the global status-bar counters from all flagged panes.
+_refresh_badge() {
+  local counts w d
+  # Store only the COUNTS as plain options; the status-right format owns the
+  # styling (literal #[...]). Storing styled text in an option is unreliable —
+  # nested #[...] from a #{var} substitution may render literally.
+  # Avoid `read < <()`: a newline-less awk output makes read return non-zero and
+  # `set -e` would abort before the values are stored.
+  counts="$(tmux list-panes -a -F '#{@agent_status}' 2>/dev/null \
+    | awk '$1=="waiting"{wn++} $1=="done"{dn++} END{printf "%d %d", wn+0, dn+0}')"
+  w="${counts%% *}"; d="${counts##* }"
+  tmux set -g @agent_waiting "${w:-0}" 2>/dev/null || true
+  tmux set -g @agent_done    "${d:-0}" 2>/dev/null || true
+  tmux refresh-client -S 2>/dev/null || true
+}
+
+cmd_mark() {
+  local status="${1:-}" label="${2:-}" summary="${3:-}"
+  case "$status" in done|waiting) ;; *) die "usage: tmuxscout mark <done|waiting> [label] [summary]";; esac
+  _dbg "mark called: status=$status pane=${TMUXSCOUT_PANE:-${TMUX_PANE:-none}} label='${2:-}'"
+  # Pane comes from $TMUXSCOUT_PANE (integrations whose env lacks tmux, e.g. Codex)
+  # or $TMUX_PANE. tmux commands address the server directly, so $TMUX isn't required.
+  local pane="${TMUXSCOUT_PANE:-${TMUX_PANE:-}}"
+  [ -n "$pane" ] || { _dbg "  -> skip: no pane (TMUX_PANE/TMUXSCOUT_PANE unset)"; exit 0; }
+  command -v tmux >/dev/null 2>&1 || exit 0
+  tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 \
+    || { _dbg "  -> skip: pane $pane not found"; exit 0; }
+
+  # Anti-noise: if you're already looking at this pane, don't flag it.
+  # "Looking" = pane active in its window, window current in session, session attached.
+  local pane_active window_active attached
+  pane_active="$(tmux display-message -p -t "$pane" '#{pane_active}' 2>/dev/null || echo 0)"
+  window_active="$(tmux display-message -p -t "$pane" '#{window_active}' 2>/dev/null || echo 0)"
+  attached="$(tmux display-message -p -t "$pane" '#{session_attached}' 2>/dev/null || echo 0)"
+  if [ "$pane_active" = "1" ] && [ "$window_active" = "1" ] && [ "${attached:-0}" != "0" ]; then
+    _dbg "  -> skip: anti-noise (you're looking at pane $pane: active+current+attached)"
+    exit 0
+  fi
+  _dbg "  -> MARK pane=$pane status=$status"
+
+  [ -n "$label" ] || label="$(tmux display-message -p -t "$pane" '#{b:pane_current_path}' 2>/dev/null || echo '?')"
+  # Sanitize: turn tabs/newlines/CR into spaces and drop other control chars, so a
+  # multi-line/ANSI agent reply can't garble the status line or popup preview.
+  summary="$(printf '%s' "$summary" | tr '\t\n\r' '   ' | tr -d '\000-\010\013-\037')"
+  tmux set -p -t "$pane" @agent_status "$status"
+  tmux set -p -t "$pane" @agent_done_at "$(date +%s)"
+  tmux set -p -t "$pane" @agent_label "$label"
+  tmux set -p -t "$pane" @agent_summary "$summary"
+  _refresh_window "$pane"
+}
+
+# Raw TSV of flagged panes, sorted (waiting first, then most recent).
+# Columns: rank done_at status session win_index win_name pane_id age label summary
+cmd_list() {
+  in_tmux || return 0
+  local now; now="$(date +%s)"
+  tmux list-panes -a -F \
+    '#{@agent_status}	#{@agent_done_at}	#{session_name}	#{window_index}	#{window_name}	#{pane_id}	#{@agent_label}	#{@agent_summary}' \
+  | awk -F'\t' -v now="$now" '
+      $1=="done" || $1=="waiting" {
+        rank = ($1=="waiting") ? 0 : 1
+        da = ($2=="") ? now : $2
+        age = now - da
+        printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", rank, da, $1, $3, $4, $5, $6, age, $7, $8
+      }' \
+  | sort -t'	' -k1,1n -k2,2nr
+}
+
+# Rich preview for the popup: provenance (session/window) + summary + recent logs.
+cmd_preview() {
+  local pane="${1:-}"
+  { [ -n "$pane" ] && in_tmux; } || { t no_pane; echo; return 0; }
+  local status session widx wname label summary da now age ic
+  # One query per field: empty values must NOT shift columns (tab-IFS read would
+  # collapse them since tab is whitespace).
+  status="$(tmux display -p -t "$pane" '#{@agent_status}'   2>/dev/null)"
+  session="$(tmux display -p -t "$pane" '#{session_name}'   2>/dev/null)"
+  widx="$(tmux display -p -t "$pane" '#{window_index}'      2>/dev/null)"
+  wname="$(tmux display -p -t "$pane" '#{window_name}'      2>/dev/null)"
+  label="$(tmux display -p -t "$pane" '#{@agent_label}'     2>/dev/null)"
+  summary="$(tmux display -p -t "$pane" '#{@agent_summary}' 2>/dev/null)"
+  da="$(tmux display -p -t "$pane" '#{@agent_done_at}'      2>/dev/null)"
+  now="$(date +%s)"; da="${da:-$now}"; age=$(( now - da ))
+  local ah
+  if   [ "$age" -lt 60 ];   then ah="${age}s"
+  elif [ "$age" -lt 3600 ]; then ah="$(( age / 60 ))m"
+  else                            ah="$(( age / 3600 ))h"; fi
+  [ "$status" = "waiting" ] && ic="$(t state_waiting)" || ic="$(t state_done)"
+
+  printf '  %-9s %s\n' "$(t lbl_project)" "${label:-?}"
+  printf '  %-9s %s  ▸  %s %s (%s)\n' "$(t lbl_session)" "${session:-?}" "$(t window)" "${widx:-?}" "${wname:-?}"
+  printf '  %-9s %s · %s\n' "$(t lbl_state)" "$ic" "$(t ago "$ah")"
+  printf '\n  ── %s %s\n' "$(t lbl_summary)" '─────────────────────────────────────'
+  if [ -n "$summary" ]; then
+    printf '%s\n' "$summary" | fold -s -w 64 | sed 's/^/  /'
+  else
+    printf '  %s\n' "$(t no_summary)"
+  fi
+  printf '\n  ── %s %s\n' "$(t lbl_logs)" '─────────────────────────────────'
+  tmux capture-pane -p -t "$pane" 2>/dev/null | tr -d '\r' | awk "NF" | tail -n "$TMUXSCOUT_PREVIEW_LINES" | sed 's/^/  /'
+}
+
+# Resolve the fzf binary even if the popup shell doesn't have ~/.local/bin on PATH.
+_find_fzf() {
+  if command -v fzf >/dev/null 2>&1; then command -v fzf; return 0; fi
+  local c
+  for c in "$HOME/.local/bin/fzf" "$HOME/.fzf/bin/fzf"; do
+    [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+
+# Print a message inside the popup and keep it open until a keypress
+# (display-popup -E closes as soon as the command exits, so an instant exit
+# just "flashes"; reading one key makes empty/error states persist).
+_popup_msg() {
+  printf '\n  %s\n\n  %s' "$1" "$(t press_key)"
+  read -rsn1 _ 2>/dev/null || true
+  printf '\n'
+}
+
+cmd_pick() {
+  in_tmux || die "not inside tmux"
+  local FZF; FZF="$(_find_fzf)" || { _popup_msg "$(t no_fzf)"; exit 0; }
+  local rows; rows="$(cmd_list)"
+  if [ -z "$rows" ]; then
+    _popup_msg "$(t none_title)
+  $(t none_hint)"
+    exit 0
+  fi
+  # fzf lines: pane_id \t target \t pretty   (display = field 3+, action keys = fields 1-2)
+  # Status column = emoji + word so ⏳/✅ are unambiguous (waiting=needs you, done=finished).
+  local lines
+  lines="$(printf '%s\n' "$rows" | awk -F'\t' -v sw="$(t word_waiting)" -v sd="$(t word_done)" '
+      function ico(s){ return (s=="waiting") ? "⏳" : "✅" }
+      function word(s){ return (s=="waiting") ? sw : sd }
+      function human(a){ if(a<60) return a"s"; if(a<3600) return int(a/60)"m"; return int(a/3600)"h" }
+      {
+        prov   = $4 " ▸ " $6
+        pretty = sprintf("%s %-8s %-18.18s  %-30.30s %5s", ico($3), word($3), $9, prov, human($8))
+        printf "%s\t%s\t%s\n", $7, $4":"$5, pretty
+      }')"
+  local sel
+  sel="$(printf '%s\n' "$lines" | "$FZF" --delimiter='\t' --with-nth='3..' \
+          --prompt="$(t prompt)" --height='100%' --border --no-multi \
+          --preview="$SELF preview {1}" \
+          --preview-window='down,60%,wrap')" || exit 0
+  [ -n "$sel" ] || exit 0
+  local pane_id target
+  pane_id="$(printf '%s' "$sel" | cut -f1)"
+  target="$(printf '%s' "$sel" | cut -f2)"
+  tmux switch-client -t "$target" 2>/dev/null || tmux select-window -t "$target" 2>/dev/null || true
+  tmux select-pane -t "$pane_id" 2>/dev/null || true
+  "$SELF" clear "$pane_id"
+}
+
+cmd_clear() {
+  in_tmux || exit 0
+  local pane="${1:-${TMUX_PANE:-}}"
+  [ -n "$pane" ] || exit 0
+  tmux set -up -t "$pane" @agent_status 2>/dev/null || true
+  tmux set -up -t "$pane" @agent_done_at 2>/dev/null || true
+  tmux set -up -t "$pane" @agent_label 2>/dev/null || true
+  tmux set -up -t "$pane" @agent_summary 2>/dev/null || true
+  _refresh_window "$pane"
+}
+
+main() {
+  local cmd="${1:-}"; [ $# -gt 0 ] && shift || true
+  case "$cmd" in
+    mark)    cmd_mark "$@";;
+    list)    cmd_list "$@";;
+    pick)    cmd_pick "$@";;
+    preview) cmd_preview "$@";;
+    clear)   cmd_clear "$@";;
+    refresh) in_tmux && _refresh_badge;;
+    setup|doctor|uninstall) exec "$(dirname "$SELF")/tmuxscout-setup" "$cmd" "$@";;
+    ""|-h|--help|help)
+      cat <<'USAGE'
+usage: tmuxscout <command>
+  popup/runtime : pick | list | preview <pane> | clear [pane] | refresh
+  flag a pane   : mark <done|waiting> [label] [summary]
+  install/wire  : setup [tmux|claude|codex|pi|opencode|all] [--print]
+  status/remove : doctor | uninstall
+USAGE
+      ;;
+    *) die "unknown command: $cmd (try --help)";;
+  esac
+}
+main "$@"
